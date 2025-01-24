@@ -1,13 +1,21 @@
 #include <SDL2/SDL.h>
+
+#ifdef __EMSCRIPTEN__
+	#include <emscripten.h>
+	EM_JS(int, window_get_width, (), {
+		return window.screen.width;
+	});
+
+	EM_JS(int, window_get_height, (), {
+		return window.screen.height;
+	});	
+#endif
+
 #include <math.h>
 #include <time.h>
 #include <stdlib.h>
-#define W_WIDTH 1080
-#define W_HEIGHT 640
 #define PI 3.1415926535f
 
-#define SCREEN_WIDTH 900
-#define SCREEN_HEIGHT 600
 #define MIN_DELTA_TIME (1.0f / 60)
 
 #define LINE_ANGLE_OFFSET 0.0f
@@ -22,6 +30,12 @@
 #define ZOOM 1000.f
 
 #define CHARGE_RADIUS (0.010f * 1000.f / ZOOM)
+
+#define PARTICLE_DEST_SIZE 		 20
+#define PARTICLE_TXT_DIAMETER  300
+
+uint32_t W_WIDTH = 1080;
+uint32_t W_HEIGHT= 640;
 
 float max_intensity = 0;
 float positive_charge_sum = 0;
@@ -262,121 +276,180 @@ void calculate_vertices(Particle* particles,int particle_num) {
 	*/
 }
 
-int main() {
-	srand(time(0));
-	SDL_Window* window = SDL_CreateWindow("Electric line of force", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W_WIDTH, W_HEIGHT, 0);
-	SDL_Renderer* renderer = SDL_CreateRenderer(window,-1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+struct MainContext {
+	SDL_Window* window;
+	SDL_Renderer* renderer;
 	SDL_Event event;
 
-	const int particle_dest_size = 20;
-	const int particle_diameter = 300;
 
-	SDL_Texture* particle_texture_red = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, particle_diameter,particle_diameter);
-	SDL_SetTextureBlendMode(particle_texture_red, SDL_BLENDMODE_BLEND);
-	uint32_t* particle_txtdata = SDL_calloc(particle_diameter * particle_diameter, sizeof(*particle_txtdata));
-	createCircle(particle_txtdata, particle_diameter / 2, 0xff5555ff);
-	SDL_UpdateTexture(particle_texture_red, 0, (void*)particle_txtdata, sizeof(*particle_txtdata) * particle_diameter);
-	SDL_SetTextureScaleMode(particle_texture_red, SDL_ScaleModeLinear);
+	SDL_Texture* particle_texture_red;
+	SDL_Texture* particle_texture_blue;
+	Particle* particles;
 
-	SDL_Texture* particle_texture_blue = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, particle_diameter,particle_diameter);
-	SDL_SetTextureBlendMode(particle_texture_blue, SDL_BLENDMODE_BLEND);
-	createCircle(particle_txtdata, particle_diameter / 2, 0xfffde98b);
-	SDL_UpdateTexture(particle_texture_blue, 0, (void*)particle_txtdata, sizeof(*particle_txtdata) * particle_diameter);
-	SDL_SetTextureScaleMode(particle_texture_blue, SDL_ScaleModeLinear);
+	int particle_capacity;
+	int particle_num;
+
+	SDL_FPoint axis_point;
+
+	int is_hold_down;
+	int holded_index;
+
+	uint64_t last_ticks;
+	uint64_t current_ticks;
+
+	int _;
+};
+
+struct MainContext Init_MainContext() {
+	struct MainContext context;
+#ifdef __EMSCRIPTEN__
+	W_WIDTH = window_get_width();
+	W_HEIGHT = window_get_height();
+#endif
+	context.window = SDL_CreateWindow("Electric line of force", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W_WIDTH, W_HEIGHT, 0);
+	context.renderer = SDL_CreateRenderer(context.window,-1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+
+
+	context.particle_texture_red = SDL_CreateTexture(context.renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, PARTICLE_TXT_DIAMETER,PARTICLE_TXT_DIAMETER);
+	SDL_SetTextureBlendMode(context.particle_texture_red, SDL_BLENDMODE_BLEND);
+	uint32_t* particle_txtdata = SDL_calloc(PARTICLE_TXT_DIAMETER * PARTICLE_TXT_DIAMETER, sizeof(*particle_txtdata));
+	createCircle(particle_txtdata, PARTICLE_TXT_DIAMETER / 2, 0xff5555ff);
+	SDL_UpdateTexture(context.particle_texture_red, 0, (void*)particle_txtdata, sizeof(*particle_txtdata) * PARTICLE_TXT_DIAMETER);
+	SDL_SetTextureScaleMode(context.particle_texture_red, SDL_ScaleModeLinear);
+
+	context.particle_texture_blue = SDL_CreateTexture(context.renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, PARTICLE_TXT_DIAMETER,PARTICLE_TXT_DIAMETER);
+	SDL_SetTextureBlendMode(context.particle_texture_blue, SDL_BLENDMODE_BLEND);
+	createCircle(particle_txtdata, PARTICLE_TXT_DIAMETER / 2, 0xfffde98b);
+	SDL_UpdateTexture(context.particle_texture_blue, 0, (void*)particle_txtdata, sizeof(*particle_txtdata) * PARTICLE_TXT_DIAMETER);
+	SDL_SetTextureScaleMode(context.particle_texture_blue, SDL_ScaleModeLinear);
 
 	SDL_free(particle_txtdata);
 
-	Particle* particles = SDL_calloc(5, sizeof(*particles));
-	particles[0].x = 0;
-	particles[0].y = 0;
-	particles[0].q = 1;
+	context.particles = SDL_calloc(5, sizeof(*context.particles));
+	context.particles[0].x = 0;
+	context.particles[0].y = 0;
+	context.particles[0].q = 1;
 
-	int particle_capacity = 5;
-	int particle_num = 1;
+	context.particle_capacity = 5;
+	context.particle_num = 1;
 
-	SDL_FPoint axis_point = {(float)W_WIDTH/2, (float)W_HEIGHT/2};
+	context.axis_point.x = (float)W_WIDTH/2;
+	context.axis_point.y = (float)W_HEIGHT/2;
 
-	int is_hold_down = 0;
-	int holded_index = 0;
+	context.is_hold_down = 0;
+	context.holded_index = 0;
 
-	uint64_t last_ticks = 0;
-	uint64_t current_ticks = 0;
+	context.last_ticks = 0;
+	context.current_ticks = 0;
+	calculate_vertices(context.particles, context.particle_num);
+	return context;
+}
 
-	calculate_vertices(particles, particle_num);
-
-	int _ = 1;
-	for (;_;) {
-		current_ticks = SDL_GetTicks64();
-		while (SDL_PollEvent(&event)) {
-			if (event.type == SDL_QUIT) _=0;
-			if (event.type == SDL_KEYDOWN) {
-				if (event.key.keysym.sym == SDLK_SPACE) {
-					if (particle_num >= particle_capacity) {
-						particle_capacity *= 2;
-						particles = SDL_realloc(particles, particle_capacity * sizeof(*particles));
+void Looping(void* contextv) 
+{
+	struct MainContext* context = contextv;
+	context->current_ticks = SDL_GetTicks64();
+	while (SDL_PollEvent(&context->event)) {
+		if (context->event.type == SDL_QUIT) {
+			context->_ = 0;
+			return;
+		}
+		if (context->event.type == SDL_KEYDOWN) {
+			if (context->event.key.keysym.sym == SDLK_p) {
+				if (context->particle_num >= context->particle_capacity) {
+					context->particle_capacity *= 2;
+					context->particles = SDL_realloc(context->particles, context->particle_capacity * sizeof(*context->particles));
+				}
+				context->particles[context->particle_num].x = (float)(rand() % (W_WIDTH  - 2 * PARTICLE_DEST_SIZE) + PARTICLE_DEST_SIZE - context->axis_point.x) / ZOOM;
+				context->particles[context->particle_num].y = (float)(rand() % (W_HEIGHT - 2 * PARTICLE_DEST_SIZE) + PARTICLE_DEST_SIZE - context->axis_point.y) / ZOOM;
+				context->particles[context->particle_num].q = 1;
+				context->particle_num++;
+				calculate_vertices(context->particles, context->particle_num);
+			}
+			if (context->event.key.keysym.sym == SDLK_m) {
+				if (context->particle_num >= context->particle_capacity) {
+					context->particle_capacity *= 2;
+					context->particles = SDL_realloc(context->particles, context->particle_capacity * sizeof(*context->particles));
+				}
+				context->particles[context->particle_num].x = (float)(rand() % (W_WIDTH  - 2 * PARTICLE_DEST_SIZE) + PARTICLE_DEST_SIZE - context->axis_point.x) / ZOOM;
+				context->particles[context->particle_num].y = (float)(rand() % (W_HEIGHT - 2 * PARTICLE_DEST_SIZE) + PARTICLE_DEST_SIZE - context->axis_point.y) / ZOOM;
+				context->particles[context->particle_num].q = -1;
+				context->particle_num++;
+				calculate_vertices(context->particles, context->particle_num);
+			}
+		}
+		if (context->event.type == SDL_MOUSEBUTTONDOWN) {
+			if (context->is_hold_down == 0) {
+				SDL_FPoint point = {(float)context->event.button.x, (float)context->event.button.y};
+				for (int i = 0;i < context->particle_num; ++i) {
+					SDL_FRect particle_rect = {context->particles[i].x, context->particles[i].y, (float)PARTICLE_DEST_SIZE, (float)PARTICLE_DEST_SIZE};
+					particle_rect = adjustToAxis(particle_rect, context->axis_point);
+					if (isPointInside(point, particle_rect)) {
+						context->is_hold_down=1;
+						context->holded_index = i;
+						break;
 					}
-					particles[particle_num].x = (float)(rand() % (W_WIDTH  - 2 * particle_dest_size) + particle_dest_size - axis_point.x) / ZOOM;
-					particles[particle_num].y = (float)(rand() % (W_HEIGHT - 2 * particle_dest_size) + particle_dest_size - axis_point.y) / ZOOM;
-					particles[particle_num].q = -3;
-					particle_num++;
-					calculate_vertices(particles, particle_num);
+				}
+			} 
+		}
+		else if (context->event.type == SDL_MOUSEMOTION) {
+			if (context->is_hold_down) {
+				if (context->current_ticks - context->last_ticks >= 20) {
+				context->particles[context->holded_index].x = ((float)context->event.button.x - context->axis_point.x ) / ZOOM;
+				context->particles[context->holded_index].y = ((float)context->event.button.y - context->axis_point.y ) / ZOOM;
+					context->last_ticks = context->current_ticks;
+					calculate_vertices(context->particles, context->particle_num);
 				}
 			}
-			if (event.type == SDL_MOUSEBUTTONDOWN) {
-				if (is_hold_down == 0) {
-					SDL_FPoint point = {(float)event.button.x, (float)event.button.y};
-					for (int i = 0;i < particle_num; ++i) {
-						SDL_FRect particle_rect = {particles[i].x, particles[i].y, (float)particle_dest_size, (float)particle_dest_size};
-						particle_rect = adjustToAxis(particle_rect, axis_point);
-						if (isPointInside(point, particle_rect)) {
-							is_hold_down=1;
-							holded_index = i;
-							break;
-						}
-					}
-				} 
-			}
-			else if (event.type == SDL_MOUSEMOTION) {
-				if (is_hold_down) {
-					if (current_ticks - last_ticks >= 20) {
-					particles[holded_index].x = ((float)event.button.x - axis_point.x ) / ZOOM;
-					particles[holded_index].y = ((float)event.button.y - axis_point.y ) / ZOOM;
-						last_ticks = current_ticks;
-						calculate_vertices(particles, particle_num);
-					}
-				}
-			}
-			else if (event.type == SDL_MOUSEBUTTONUP) {
-				is_hold_down = 0;
-			}
 		}
-		SDL_SetRenderDrawColor(renderer, 40, 42, 54, 0xff);
-		SDL_RenderClear(renderer);
-		SDL_SetRenderDrawColor(renderer, 68,71,90,0xff);
-		drawGrid(renderer, axis_point);
-		SDL_SetRenderDrawColor(renderer, 248,248,242,0xff);
-		drawAxis(renderer, axis_point);
-
-		for (int i = 0;i < line_count; ++i) {
-			for (int j = 0;j < segment_count[i]; ++j) {
-				SDL_RenderDrawPointF(renderer, vertices[i][j].x * ZOOM + axis_point.x, vertices[i][j].y * ZOOM + axis_point.y);
-			}
+		else if (context->event.type == SDL_MOUSEBUTTONUP) {
+			context->is_hold_down = 0;
 		}
-
-		for (int i = 0;i < particle_num; ++i) {
-			SDL_FRect particle_rect = {particles[i].x, particles[i].y, (float)particle_dest_size, (float)particle_dest_size};
-			particle_rect = adjustToAxis(particle_rect, axis_point);
-			if (particles[i].q < 0) SDL_RenderCopyF(renderer, particle_texture_blue, 0, &particle_rect);
-			else SDL_RenderCopyF(renderer, particle_texture_red, 0, &particle_rect);
-		}
-		SDL_RenderPresent(renderer);
 	}
+	SDL_SetRenderDrawColor(context->renderer, 40, 42, 54, 0xff);
+	SDL_RenderClear(context->renderer);
+	SDL_SetRenderDrawColor(context->renderer, 68,71,90,0xff);
+	drawGrid(context->renderer, context->axis_point);
+	SDL_SetRenderDrawColor(context->renderer, 248,248,242,0xff);
+	drawAxis(context->renderer, context->axis_point);
+
+	for (int i = 0;i < line_count; ++i) {
+		for (int j = 0;j < segment_count[i]; ++j) {
+			SDL_RenderDrawPointF(context->renderer, vertices[i][j].x * ZOOM + context->axis_point.x, vertices[i][j].y * ZOOM + context->axis_point.y);
+		}
+	}
+
+	for (int i = 0;i < context->particle_num; ++i) {
+		SDL_FRect particle_rect = {context->particles[i].x, context->particles[i].y, (float)PARTICLE_DEST_SIZE, (float)PARTICLE_DEST_SIZE};
+		particle_rect = adjustToAxis(particle_rect, context->axis_point);
+		if (context->particles[i].q < 0) SDL_RenderCopyF(context->renderer, context->particle_texture_blue, 0, &particle_rect);
+		else SDL_RenderCopyF(context->renderer, context->particle_texture_red, 0, &particle_rect);
+	}
+	SDL_RenderPresent(context->renderer);
+}
+
+int main() {
+	srand(time(0));
+
+	struct MainContext context = Init_MainContext();
+
+
+
+#ifdef __EMSCRIPTEN__
+	emscripten_set_main_loop_arg(Looping, &context, -1, 1);
+#else
+	context._ = 1;
+	for (;context._;) {
+		Looping(&context);
+	}
+#endif
+
 	clear();
-	SDL_free(particles);
-	SDL_DestroyTexture(particle_texture_red);
-	SDL_DestroyTexture(particle_texture_blue);
-	SDL_DestroyRenderer(renderer);
-	SDL_DestroyWindow(window);
+	SDL_free(context.particles);
+	SDL_DestroyTexture(context.particle_texture_red);
+	SDL_DestroyTexture(context.particle_texture_blue);
+	SDL_DestroyRenderer(context.renderer);
+	SDL_DestroyWindow(context.window);
 	return 0;
 }
 
